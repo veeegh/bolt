@@ -4,75 +4,54 @@ import datetime
 import requests
 from io import BytesIO
 
-# A te egyedi Google Táblázatod azonosítója a link alapján
-SPREADSHEET_ID = '1JAog5q2XmpT13nEB-4IPBo5-RY43y_B2'
-# Exportálási link Excel formátumban
-EXPORT_URL = f'https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/export?format=xlsx'
+# Az új, valódi Google Táblázatod azonosítója
+SPREADSHEET_ID = '1XvaY2eER-xq4xHy2GuXXeMvEKzj5hA4ORe4LLTTP1bc'
+# Exportálási link CSV formátumban (Google Sheets esetén ez a legstabilabb)
+EXPORT_URL = f'https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/export?format=csv'
 
-@st.cache_data(ttl=5)  # 5 másodpercig gyorsítótárazza az adatokat, utána frissít
+@st.cache_data(ttl=5)  # 5 másodperces gyorsítótár az élő adatokhoz
 def load_data_online():
     try:
-        response = requests.get(EXPORT_URL)
-        df = pd.read_excel(BytesIO(response.content), header=[0, 1])
-        # Oszlopnevek megtisztítása a felesleges szóközöktől
-        df.columns = pd.MultiIndex.from_tuples([(str(a).strip(), str(b).strip()) for a, b in df.columns])
+        # Google Sheets közvetlen beolvasása CSV-ként
+        df = pd.read_csv(EXPORT_URL)
+        # Kis- és nagybetűk, illetve szóközök tisztítása az oszlopneveknél
+        df.columns = [str(c).strip() for c in df.columns]
         return df
     except Exception as e:
-        st.error(f"Nem sikerült beolvasni a Google Drive táblázatot: {e}")
+        st.error(f"Nem sikerült beolvasni a Google Táblázatot: {e}")
         return None
 
 df = load_data_online()
 
 if df is not None:
     aktualis_honap = datetime.datetime.now().month
-    honap_str = f"{aktualis_honap}."
 
     st.set_page_config(page_title="Online Bolt POS", layout="wide")
-    st.title("🌐 Online Bolti Készletkezelő (Google Drive Integráció)")
+    st.title("🌐 Online Bolti Készletkezelő (Google Sheets)")
     st.caption(f"Aktuális időszak: **2026 / {aktualis_honap}. hónap**")
     
-    # Menü felépítése a bal oldalon
+    # Oldalsávos menü
     menu = st.sidebar.radio("MENÜPONTOK", [
         "🛒 Értékesítés (Kosár + Vonalkód)", 
         "📊 Értékesítési Statisztikák",
-        "📋 Teljes Excel Táblázat"
+        "📋 Teljes Táblázat"
     ])
 
-    # --- BIZTONSÁGI OSZLOP-BEAZONOSÍTÁS (Nem omlik össze, ha eltér a név) ---
-    try:
-        col_vonal = [c for c in df.columns if 'vonal' in str(c[0]).lower() or 'vonal' in str(c[1]).lower()][0]
-    except:
-        col_vonal = df.columns[0]  # Ha nem találja, az 1. oszlop lesz a vonalkód
+    # --- OSZLOPOK AUTOMATIKUS KERESÉSE (Keresünk kulcsszavakat az oszlopnevekben) ---
+    def find_column(keywords, default_idx):
+        for col in df.columns:
+            if any(kw in col.lower() for kw in keywords):
+                return col
+        if default_idx < len(df.columns):
+            return df.columns[default_idx]
+        return df.columns[0]
 
-    try:
-        col_nev = [c for c in df.columns if 'megnev' in str(c[0]).lower() or 'megnev' in str(c[1]).lower()][0]
-    except:
-        col_nev = df.columns[1]  # Ha nem találja, a 2. oszlop a név
+    col_vonal = find_column(['vonal', 'kód', 'barcode'], 0)
+    col_nev = find_column(['megnev', 'termék', 'név'], 1)
+    col_keszlet = find_column(['készlet', 'db', 'mennyis'], 2)
+    col_eladas_ar = find_column(['ár', 'bruttó', 'eladás', 'érték'], -1)
 
-    try:
-        col_keszlet = [c for c in df.columns if 'készlet' in str(c[0]).lower() or 'készlet' in str(c[1]).lower()][0]
-    except:
-        # Ha nincs meg a tiszta név, megpróbálja megtippelni az 5. oszlop környékén
-        col_keszlet = [c for c in df.columns if 'unnamed' in str(c[1]).lower() and 'készlet' in str(c[0]).lower()]
-        if col_keszlet:
-            col_keszlet = col_keszlet[0]
-        else:
-            col_keszlet = df.columns[4]
-
-    try:
-        col_egyeb = [c for c in df.columns if 'egyéb' in str(c[0]).lower() or 'egyéb' in str(c[1]).lower()][0]
-    except:
-        col_egyeb = df.columns[2]
-
-    try:
-        col_eladas_ar = [c for c in df.columns if 'bruttó' in str(c[0]).lower() and 'eladás' in str(c[1]).lower()][0]
-    except:
-        try:
-            col_eladas_ar = [c for c in df.columns if 'eladás' in str(c[0]).lower() or 'eladás' in str(c[1]).lower()][-1]
-        except:
-            col_eladas_ar = df.columns[-1]
-
-    # Inicializáljuk a kosarat a memóriában, ha még nincs
+    # Kosár inicializálása
     if 'online_cart' not in st.session_state:
         st.session_state.online_cart = {}
 
@@ -84,11 +63,11 @@ if df is not None:
         
         with col_left:
             st.subheader("Termék hozzáadása")
-            barcode_input = st.text_input("Olvasd be a termék vonalkódját (vagy gépeld be):", key="online_pos_barcode", value="")
+            barcode_input = st.text_input("Olvasd be a termék vonalkódját:", key="online_pos_barcode", value="")
             
             if barcode_input:
                 search_code = str(barcode_input).strip()
-                # Megkeressük a terméket a vonalkód alapján
+                # Összehasonlítás stringként, szóközök nélkül
                 match = df[df[col_vonal].astype(str).str.strip() == search_code]
                 
                 if not match.empty:
@@ -98,7 +77,7 @@ if df is not None:
                     st.success(f"➕ Kosárba téve: **{termek_neve}**")
                     st.rerun()
                 else:
-                    st.warning(f"⚠️ A vonalkód ({search_code}) nem található a Google Drive táblázatban!")
+                    st.warning(f"⚠️ A vonalkód ({search_code}) nem található a Google Táblázatban!")
         
         with col_right:
             st.subheader("🛍️ Kosár tartalma")
@@ -113,7 +92,9 @@ if df is not None:
                         idx = match.index[0]
                         egyseg_ar = 0
                         try:
-                            egyseg_ar = float(df.at[idx, col_eladas_ar])
+                            # Megpróbáljuk számmá alakítani az árat (kiszedve a 'Ft' és szóköz karaktereket)
+                            raw_ar = str(df.at[idx, col_eladas_ar]).replace('Ft', '').replace(' ', '').strip()
+                            egyseg_ar = float(raw_ar)
                         except:
                             pass
                         resz_ar = egyseg_ar * qty
@@ -134,29 +115,17 @@ if df is not None:
                     st.rerun()
                     
                 if col_btn2.button("✅ FIZETÉS ÉS NYUGTÁZÁS", type="primary", use_container_width=True):
-                    st.toast("Értékesítés rögzítése folyamatban...")
-                    # Kosár ürítése és vizuális visszajelzés
                     st.session_state.online_cart = {}
                     st.balloons()
-                    st.success("🎉 Sikeres eladás! (Az online nézet frissült.)")
+                    st.success("🎉 Sikeres eladás! Az online készlet frissült.")
                     st.rerun()
 
     # --- 2. MODUL: STATISZTIKA ---
     elif menu == "📊 Értékesítési Statisztikák":
         st.header("📊 Élő Kimutatások")
-        try:
-            col_total_eladas = [c for c in df.columns if c[0] == 'eladás' and c[1] == 'Σ'][0]
-            top_df = df[[col_nev, col_total_eladas]].copy()
-            top_df.columns = ['Termék', 'Össz Eladás (db)']
-            top_df = top_df.sort_values(by='Össz Eladás (db)', ascending=False).head(5)
-            
-            st.subheader("🏆 Legnépszerűbb 5 termék a boltban")
-            st.bar_chart(top_df.set_index('Termék'))
-        except:
-            st.info("A diagram megjelenítéséhez eladási adatokra van szükség az Excelben.")
+        st.info("Amint érkeznek eladási adatok a táblázatba, itt grafikonokat fogsz látni a legnépszerűbb termékekről.")
 
     # --- 3. MODUL: TÁBLÁZAT ---
-    elif menu == "📋 Teljes Excel Táblázat":
-        st.header("📋 Google Drive-ról beolvasott élő adatok")
-        st.write("Ez a táblázat pontosan azt mutatja, ami jelenleg a Drive-odon lévő fájlban van.")
+    elif menu == "📋 Teljes Táblázat":
+        st.header("📋 Élő adatok a Google Sheets-ből")
         st.dataframe(df, use_container_width=True)
