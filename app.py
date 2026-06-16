@@ -48,7 +48,7 @@ if df is not None:
     col_nev = get_column_by_keyword(['megnevezés', 'megnev', 'termék', 'név'], 1)
     col_eladas_ar = get_column_by_keyword(['bruttó', 'eladás', 'ár'], 4)
 
-    # Kosár inicializálása a memóriában (Tiszta listaként az elcsúszások ellen)
+    # Kosár inicializálása a memóriában (Golyóálló listás szerkezet)
     if 'online_cart_list' not in st.session_state:
         st.session_state.online_cart_list = []
 
@@ -63,14 +63,13 @@ if df is not None:
             barcode_input = st.text_input("Kattints ide a kurzorral, majd olvasd be a vonalkódot:", key="online_pos_barcode", value="")
             
             if barcode_input:
-                search_code = str(barcode_input).strip()
+                search_code = str(barcode_input).strip().replace('.0', '')
                 
-                # Szigorú keresés: megtisztítjuk a Google Táblázat vonalkód oszlopát is a keresés idejére
+                # Szigorú keresés: megtisztítjuk a Google Táblázat vonalkód oszlopát is
                 df_clean = df.copy()
                 df_clean['clean_barcode'] = df_clean[col_vonal].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-                search_code_clean = search_code.replace('.0', '')
 
-                match = df_clean[df_clean['clean_barcode'] == search_code_clean]
+                match = df_clean[df_clean['clean_barcode'] == search_code]
 
                 if not match.empty:
                     idx = match.index[0]
@@ -84,11 +83,11 @@ if df is not None:
                     except:
                         pass
 
-                    # Mentés a kosárba egy biztos struktúrában
+                    # Azonnali mentés a kosárba
                     st.session_state.online_cart_list.append({
-                        "vonalkod": search_code_clean,
-                        "nev": termek_neve,
-                        "ar": egyseg_ar
+                        "Vonalkód": search_code,
+                        "Termék": termek_neve,
+                        "Ár": egyseg_ar
                     })
                     
                     st.success(f"➕ Kosárba téve: **{termek_neve}**")
@@ -101,27 +100,28 @@ if df is not None:
             if not st.session_state.online_cart_list:
                 st.write("*A kosár jelenleg üres. Várja a beolvasást...*")
             else:
-                # Összesítjük a listában lévő elemeket a megjelenítéshez
-                raw_cart_df = pd.DataFrame(st.session_state.online_cart_list)
+                # Egyszerű, golyóálló összesítés ciklussal (Nincs Pandas groupby hiba!)
+                counts = {}
+                for item in st.session_state.online_cart_list:
+                    key = (item["Vonalkód"], item["Termék"], item["Ár"])
+                    counts[key] = counts.get(key, 0) + 1
                 
-                # Csoportosítunk név és vonalkód szerint, hogy darabszámot számoljunk
-                summary_df = raw_cart_df.groupby(['vonalkod', 'nev']).agg(
-                    Mennyiség=('ar', 'count'),
-                    Egységár=('ar', 'first')
-                ).reset_index()
+                # Átrakjuk egy szép táblázat formátumba
+                final_items = []
+                vegosszeg = 0
+                for (vonal, nev, ar), db in counts.items():
+                    reszosszeg = ar * db
+                    vegosszeg += reszosszeg
+                    final_items.append({
+                        "Vonalkód": vonal,
+                        "Termék": nev,
+                        "Mennyiség": f"{db} db",
+                        "Egységár": f"{int(ar):,} Ft".replace(",", " "),
+                        "Részösszeg": f"{int(reszosszeg):,} Ft".replace(",", " ")
+                    })
                 
-                summary_df['Részösszeg_Int'] = summary_df['Mennyiség'] * summary_df['Egységár']
-                
-                # Formázás a táblázathoz
-                display_df = pd.DataFrame()
-                display_df['Vonalkód'] = summary_df['vonalkod']
-                display_df['Termék'] = summary_df['nev']
-                display_df['Mennyiség (db)'] = summary_df['Mennyiség']
-                display_df['Részösszeg'] = summary_df['Részösszeg_Int'].apply(lambda x: f"{int(x):,} Ft".replace(",", " "))
-                
-                vegosszeg = summary_df['Részösszeg_Int'].sum()
-                
-                st.table(display_df.set_index("Vonalkód"))
+                # Megjelenítés tiszta táblázatként
+                st.table(pd.DataFrame(final_items).set_index("Vonalkód"))
                 st.markdown(f"### 💰 Végösszeg: **{int(vegosszeg):,} Ft**".replace(",", " "))
                 
                 col_btn1, col_btn2 = st.columns(2)
