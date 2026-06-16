@@ -4,22 +4,28 @@ import datetime
 import requests
 from io import BytesIO
 
-# AZ ÚJ Google Táblázatod pontos azonosítója
+# 1. AZ ÚJ Google Táblázatod azonosítója
 SPREADSHEET_ID = '10QStBpYSinhy9y6pCn6Kk9tUfzbIGPKwESJZR_33gj0'
-# Exportálási link Excel formátumban (a kétrétegű fejléc megtartása miatt ez a legjobb)
-EXPORT_URL = f'https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/export?format=xlsx'
 
-@st.cache_data(ttl=2)  # 2 másodperces gyorsítótár a szinte azonnali élő frissítésekhez
+# 2. FONTOS: Írd be ide a Google Táblázatod alsó fülének a PONTOS nevét!
+# Ha a fül neve más (pl. "Munkalap1" vagy "Készlet"), írd át arra, ami ott szerepel!
+SHEET_NAME = 'ÖSSZES'
+
+# Közvetlen letöltési link a megadott fülhöz
+EXPORT_URL = f'https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/gviz/tq?tqx=out:csv&sheet={requests.utils.quote(SHEET_NAME)}'
+
+@st.cache_data(ttl=2)
 def load_data_online():
     try:
-        response = requests.get(EXPORT_URL)
-        # Beolvassuk a táblázatot úgy, hogy az első 2 sort tekintjük a fejlécnek (Multi-index)
-        df = pd.read_excel(BytesIO(response.content), header=[0, 1])
-        # Megtisztítjuk az oszlopneveket a láthatatlan szóközöktől
-        df.columns = pd.MultiIndex.from_tuples([(str(a).strip(), str(b).strip()) for a, b in df.columns])
+        # A legstabilabb CSV alapú beolvasás a pontos fül megadásával
+        df = pd.read_csv(EXPORT_URL)
+        
+        # Ha a Google az első sort vette fejlécnek, de nálad az összevont "2026. JÚNIUS", 
+        # megtisztítjuk a rendszert, hogy lássuk a valódi oszlopokat
+        df.columns = [str(c).strip() for c in df.columns]
         return df
     except Exception as e:
-        st.error(f"Nem sikerült beolvasni a Google Táblázatot: {e}")
+        st.error(f"Nem sikerült beolvasni a Google Táblázat '{SHEET_NAME}' fülét: {e}")
         return None
 
 df = load_data_online()
@@ -27,25 +33,28 @@ df = load_data_online()
 if df is not None:
     st.set_page_config(page_title="Online Bolt POS", layout="wide")
     st.title("🌐 Online Bolti Készletkezelő")
+    st.caption(f"Aktuális fül: **{SHEET_NAME}**")
     
-    # Menüválasztó a bal oldali sávban
     menu = st.sidebar.radio("MENÜPONTOK", [
         "🛒 Értékesítés (Kosár + Vonalkód)", 
         "📋 Teljes Táblázat Ellenőrzése"
     ])
 
-    # --- OSZLOPOK PONTOS BEAZONOSÍTÁSA A TE KÉPED ALAPJÁN ---
-    try:
-        col_vonal = [c for c in df.columns if 'vonalkód' in str(c[0]).lower() or 'vonalkód' in str(c[1]).lower()][0]
-        col_nev = [c for c in df.columns if 'megnevezés' in str(c[0]).lower() or 'megnevezés' in str(c[1]).lower()][0]
-        col_eladas_ar = [c for c in df.columns if 'bruttó' in str(c[0]).lower() and 'eladás' in str(c[1]).lower()][0]
-    except Exception as e:
-        # Biztonsági tartalék indexek alapján, ha a név szerinti keresés elcsúszna
-        col_vonal = df.columns[7]      # H oszlop (Vonalkód)
-        col_nev = df.columns[1]        # B oszlop (Megnevezés)
-        col_eladas_ar = df.columns[4]  # E oszlop (Bruttó eladási ár)
+    # --- INTELLIGENS OSZLOPKERESŐ ---
+    # Megkeresi az oszlopot, ha szerepel a nevében a kulcsszó, vagy ha a Google "Unnamed"-nek nevezte el
+    def get_column_by_keyword(keywords, default_index):
+        for idx, col in enumerate(df.columns):
+            if any(kw in col.lower() for kw in keywords):
+                return col
+        if default_index < len(df.columns):
+            return df.columns[default_index]
+        return df.columns[0]
 
-    # Kosár inicializálása a memóriában
+    # A te táblázatod alapján hozzárendeljük az oszlopokat
+    col_vonal = get_column_by_keyword(['vonal', 'kód', 'barcode'], 7)  # Keresi a vonalkódot, különben a 8. oszlop
+    col_nev = get_column_by_keyword(['megnev', 'termék', 'név'], 1)     # Keresi a megnevezést, különben a 2. oszlop
+    col_eladas_ar = get_column_by_keyword(['bruttó', 'eladás', 'ár'], 4) # Keresi az árat, különben az 5. oszlop
+
     if 'online_cart' not in st.session_state:
         st.session_state.online_cart = {}
 
@@ -62,11 +71,11 @@ if df is not None:
             if barcode_input:
                 search_code = str(barcode_input).strip()
                 
-                # Keresés normál stringként
+                # Keresés a vonalkód oszlopban
                 match = df[df[col_vonal].astype(str).str.strip() == search_code]
                 
-                # Ha nem találja, megpróbálja levágni a tizedesjegyeket (.0), amiket a táblázat generálhat
                 if match.empty:
+                    # Tizedesjegy-levágás (.0) kezelése
                     match = df[df[col_vonal].astype(str).str.strip().str.startswith(search_code)]
 
                 if not match.empty:
@@ -76,7 +85,7 @@ if df is not None:
                     st.success(f"➕ Kosárba téve: **{termek_neve}**")
                     st.rerun()
                 else:
-                    st.warning(f"⚠️ A vonalkód ({search_code}) nem található az új táblázatban!")
+                    st.warning(f"⚠️ A vonalkód ({search_code}) nem található a táblázatban!")
         
         with col_right:
             st.subheader("🛍️ Kosár tartalma")
@@ -94,7 +103,6 @@ if df is not None:
                         idx = match.index[0]
                         egyseg_ar = 0
                         try:
-                            # Ár megtisztítása a formázástól (Ft, szóközök eltávolítása a matematikai számításhoz)
                             raw_ar = str(df.at[idx, col_eladas_ar]).replace('Ft', '').replace(' ', '').replace('\xa0', '').strip()
                             egyseg_ar = float(raw_ar)
                         except:
@@ -121,4 +129,10 @@ if df is not None:
                         st.session_state.online_cart = {}
                         st.balloons()
                         st.success("🎉 Sikeres értékesítés rögzítve!")
-                        st.rerun
+                        st.rerun()
+
+    # --- 2. MODUL: TÁBLÁZAT ---
+    elif menu == "📋 Teljes Táblázat Ellenőrzése":
+        st.header("📋 Élő adatok a Google Sheets-ből")
+        st.write(f"A(z) **{SHEET_NAME}** fül beolvasott adatai:")
+        st.dataframe(df, use_container_width=True)
