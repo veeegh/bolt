@@ -4,23 +4,23 @@ import datetime
 import requests
 from io import BytesIO
 
-# 1. Google Táblázat azonosító
+# 1. AZ ÚJ Google Táblázatod azonosítója
 SPREADSHEET_ID = '10QStBpYSinhy9y6pCn6Kk9tUfzbIGPKwESJZR_33gj0'
-# 2. A fül pontos neve
+
+# 2. A Google Táblázatod alsó fülének a pontos neve
 SHEET_NAME = 'ÖSSZES'
 
-# Közvetlen CSV letöltési link a megadott fülhöz, fejléc nélkül (így nem tud elcsúszni)
+# Közvetlen letöltési link a megadott fülhöz
 EXPORT_URL = f'https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/gviz/tq?tqx=out:csv&sheet={requests.utils.quote(SHEET_NAME)}'
 
 @st.cache_data(ttl=2)
 def load_data_online():
     try:
-        # Beolvassuk a táblázatot úgy, hogy a Google negyedik sorától (ahol a valódi adatok kezdődnek) nézzük
-        # Így átugorjuk a problémás dupla fejléceket
-        df = pd.read_csv(EXPORT_URL, header=None, skiprows=2)
+        df = pd.read_csv(EXPORT_URL)
+        df.columns = [str(c).strip() for c in df.columns]
         return df
     except Exception as e:
-        st.error(f"Hiba a beolvasáskor: {e}")
+        st.error(f"Nem sikerült beolvasni a Google Táblázat '{SHEET_NAME}' fülét: {e}")
         return None
 
 df = load_data_online()
@@ -35,20 +35,20 @@ if df is not None:
         "📋 Teljes Táblázat Ellenőrzése"
     ])
 
-    # --- FIX OSZLOP-BEOSZTÁS A TE TÁBLÁZATOD ALAPJÁN (A=0, B=1, C=2...) ---
-    # A képed alapján:
-    # B oszlop (1-es index) = Megnevezés
-    # E oszlop (4-es index) = Bruttó eladási ár
-    # H oszlop (7-es index) = Vonalkód
-    
-    # Biztonsági ellenőrzés: ha kevesebb oszlop jött be, dinamikusan alkalmazkodik
-    total_cols = len(df.columns)
-    
-    col_nev_idx = 1 if total_cols > 1 else 0
-    col_eladas_idx = 4 if total_cols > 4 else (total_cols - 1)
-    col_vonal_idx = 7 if total_cols > 7 else (total_cols - 1)
+    # --- OSZLOPOK PONTOS BEAZONOSÍTÁSA ---
+    def get_column_by_keyword(keywords, default_index):
+        for idx, col in enumerate(df.columns):
+            if any(kw in col.lower() for kw in keywords):
+                return col
+        if default_index < len(df.columns):
+            return df.columns[default_index]
+        return df.columns[0]
 
-    # Kosár inicializálása
+    col_vonal = get_column_by_keyword(['vonalkód', 'vonal', 'kód', 'barcode'], 7)
+    col_nev = get_column_by_keyword(['megnevezés', 'megnev', 'termék', 'név'], 1)
+    col_eladas_ar = get_column_by_keyword(['bruttó', 'eladás', 'ár'], 4)
+
+    # Kosár inicializálása a memóriában (Tiszta listaként az elcsúszások ellen)
     if 'online_cart_list' not in st.session_state:
         st.session_state.online_cart_list = []
 
@@ -63,29 +63,30 @@ if df is not None:
             barcode_input = st.text_input("Kattints ide a kurzorral, majd olvasd be a vonalkódot:", key="online_pos_barcode", value="")
             
             if barcode_input:
-                search_code = str(barcode_input).strip().replace('.0', '')
+                search_code = str(barcode_input).strip()
                 
-                # Letisztítjuk a kiválasztott vonalkód oszlopot a kereséshez
+                # Szigorú keresés: megtisztítjuk a Google Táblázat vonalkód oszlopát is a keresés idejére
                 df_clean = df.copy()
-                df_clean['clean_barcode'] = df_clean[col_vonal_idx].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+                df_clean['clean_barcode'] = df_clean[col_vonal].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+                search_code_clean = search_code.replace('.0', '')
 
-                match = df_clean[df_clean['clean_barcode'] == search_code]
+                match = df_clean[df_clean['clean_barcode'] == search_code_clean]
 
                 if not match.empty:
                     idx = match.index[0]
-                    termek_neve = df.at[idx, col_nev_idx]
+                    termek_neve = df.at[idx, col_nev]
                     
-                    # Ár kiszedése és tisztítása
+                    # Ár kinyerése és tisztítása biztonságosan
                     egyseg_ar = 0
                     try:
-                        raw_ar = str(df.at[idx, col_eladas_idx]).replace('Ft', '').replace(' ', '').replace('\xa0', '').strip()
+                        raw_ar = str(df.at[idx, col_eladas_ar]).replace('Ft', '').replace(' ', '').replace('\xa0', '').strip()
                         egyseg_ar = int(float(raw_ar))
                     except:
                         pass
 
-                    # Kosárba rakás
+                    # Mentés a kosárba egy biztos struktúrában
                     st.session_state.online_cart_list.append({
-                        "vonalkod": search_code,
+                        "vonalkod": search_code_clean,
                         "nev": termek_neve,
                         "ar": egyseg_ar
                     })
@@ -93,14 +94,17 @@ if df is not None:
                     st.success(f"➕ Kosárba téve: **{termek_neve}**")
                     st.rerun()
                 else:
-                    st.warning(f"⚠️ A vonalkód ({search_code}) nem található a táblázat H oszlopában!")
+                    st.warning(f"⚠️ A vonalkód ({search_code}) nem található a táblázatban!")
         
         with col_right:
             st.subheader("🛍️ Kosár tartalma")
             if not st.session_state.online_cart_list:
                 st.write("*A kosár jelenleg üres. Várja a beolvasást...*")
             else:
+                # Összesítjük a listában lévő elemeket a megjelenítéshez
                 raw_cart_df = pd.DataFrame(st.session_state.online_cart_list)
+                
+                # Csoportosítunk név és vonalkód szerint, hogy darabszámot számoljunk
                 summary_df = raw_cart_df.groupby(['vonalkod', 'nev']).agg(
                     Mennyiség=('ar', 'count'),
                     Egységár=('ar', 'first')
@@ -108,6 +112,7 @@ if df is not None:
                 
                 summary_df['Részösszeg_Int'] = summary_df['Mennyiség'] * summary_df['Egységár']
                 
+                # Formázás a táblázathoz
                 display_df = pd.DataFrame()
                 display_df['Vonalkód'] = summary_df['vonalkod']
                 display_df['Termék'] = summary_df['nev']
@@ -133,19 +138,5 @@ if df is not None:
     # --- 2. MODUL: TÁBLÁZAT ---
     elif menu == "📋 Teljes Táblázat Ellenőrzése":
         st.header("📋 Élő adatok a Google Sheets-ből")
-        st.write(f"A(z) **{SHEET_NAME}** fül nyers, letisztított adatai (Fejléc nélkül):")
-        
-        # Elnevezzük az oszlopokat a könnyebb olvashatóságért az ellenőrző képernyőn
-        display_df = df.copy()
-        try:
-            display_df.columns = [f"Oszlop {i+1}" for i in range(len(display_df.columns))]
-            if len(display_df.columns) > 7:
-                display_df = display_df.rename(columns={
-                    "Oszlop 2": "Megnevezés (B)",
-                    "Oszlop 5": "Bruttó eladási ár (E)",
-                    "Oszlop 8": "Vonalkód (H)"
-                })
-        except:
-            pass
-            
-        st.dataframe(display_df, use_container_width=True)
+        st.write(f"A(z) **{SHEET_NAME}** fül beolvasott adatai:")
+        st.dataframe(df, use_container_width=True)
