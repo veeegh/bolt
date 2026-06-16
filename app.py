@@ -4,23 +4,25 @@ import datetime
 import requests
 from io import BytesIO
 
-# 1. AZ ÚJ Google Táblázatod azonosítója
+# 1. Google Táblázat azonosító
 SPREADSHEET_ID = '10QStBpYSinhy9y6pCn6Kk9tUfzbIGPKwESJZR_33gj0'
-
-# 2. A Google Táblázatod alsó fülének a pontos neve
+# 2. A fül pontos neve
 SHEET_NAME = '2026. JÚNIUS'
 
-# Közvetlen letöltési link a megadott fülhöz
-EXPORT_URL = f'https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/gviz/tq?tqx=out:csv&sheet={requests.utils.quote(SHEET_NAME)}'
+# Visszaváltunk az Excel (.xlsx) alapú letöltésre, mert az tökéletesen kezeli a te kétrétegű fejlécedet!
+EXPORT_URL = f'https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/export?format=xlsx'
 
 @st.cache_data(ttl=2)
 def load_data_online():
     try:
-        df = pd.read_csv(EXPORT_URL)
-        df.columns = [str(c).strip() for c in df.columns]
+        response = requests.get(EXPORT_URL)
+        # Beolvasás úgy, hogy az első két sort fejlécként kezeljük
+        df = pd.read_excel(BytesIO(response.content), header=[0, 1])
+        # Tisztítjuk a neveket
+        df.columns = pd.MultiIndex.from_tuples([(str(a).strip(), str(b).strip()) for a, b in df.columns])
         return df
     except Exception as e:
-        st.error(f"Nem sikerült beolvasni a Google Táblázat '{SHEET_NAME}' fülét: {e}")
+        st.error(f"Hiba a beolvasáskor: {e}")
         return None
 
 df = load_data_online()
@@ -35,20 +37,24 @@ if df is not None:
         "📋 Teljes Táblázat Ellenőrzése"
     ])
 
-    # --- OSZLOPOK PONTOS BEAZONOSÍTÁSA ---
-    def get_column_by_keyword(keywords, default_index):
-        for idx, col in enumerate(df.columns):
-            if any(kw in col.lower() for kw in keywords):
-                return col
-        if default_index < len(df.columns):
-            return df.columns[default_index]
-        return df.columns[0]
+    # --- OKOS OSZLOP-BEAZONOSÍTÁS ---
+    # Megkeressük a vonalkódot, megnevezést és árat a te táblázatod képe alapján
+    try:
+        col_vonal = [c for c in df.columns if 'vonalkód' in str(c[0]).lower() or 'vonalkód' in str(c[1]).lower()][0]
+    except:
+        col_vonal = df.columns[7] # H oszlop
 
-    col_vonal = get_column_by_keyword(['vonalkód', 'vonal', 'kód', 'barcode'], 7)
-    col_nev = get_column_by_keyword(['megnevezés', 'megnev', 'termék', 'név'], 1)
-    col_eladas_ar = get_column_by_keyword(['bruttó', 'eladás', 'ár'], 4)
+    try:
+        col_nev = [c for c in df.columns if 'megnevezés' in str(c[0]).lower() or 'megnevezés' in str(c[1]).lower()][0]
+    except:
+        col_nev = df.columns[1] # B oszlop
 
-    # Kosár inicializálása a memóriában (Tiszta listaként az elcsúszások ellen)
+    try:
+        col_eladas_ar = [c for c in df.columns if 'bruttó' in str(c[0]).lower() and 'eladás' in str(c[1]).lower()][0]
+    except:
+        col_eladas_ar = df.columns[4] # E oszlop
+
+    # Kosár inicializálása
     if 'online_cart_list' not in st.session_state:
         st.session_state.online_cart_list = []
 
@@ -63,20 +69,19 @@ if df is not None:
             barcode_input = st.text_input("Kattints ide a kurzorral, majd olvasd be a vonalkódot:", key="online_pos_barcode", value="")
             
             if barcode_input:
-                search_code = str(barcode_input).strip()
+                search_code = str(barcode_input).strip().replace('.0', '')
                 
-                # Szigorú keresés: megtisztítjuk a Google Táblázat vonalkód oszlopát is a keresés idejére
+                # Vonalkód oszlop letisztítása a kereséshez
                 df_clean = df.copy()
                 df_clean['clean_barcode'] = df_clean[col_vonal].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
-                search_code_clean = search_code.replace('.0', '')
 
-                match = df_clean[df_clean['clean_barcode'] == search_code_clean]
+                match = df_clean[df_clean['clean_barcode'] == search_code]
 
                 if not match.empty:
                     idx = match.index[0]
                     termek_neve = df.at[idx, col_nev]
                     
-                    # Ár kinyerése és tisztítása biztonságosan
+                    # Ár kiszedése
                     egyseg_ar = 0
                     try:
                         raw_ar = str(df.at[idx, col_eladas_ar]).replace('Ft', '').replace(' ', '').replace('\xa0', '').strip()
@@ -84,9 +89,9 @@ if df is not None:
                     except:
                         pass
 
-                    # Mentés a kosárba egy biztos struktúrában
+                    # Kosárba rakás
                     st.session_state.online_cart_list.append({
-                        "vonalkod": search_code_clean,
+                        "vonalkod": search_code,
                         "nev": termek_neve,
                         "ar": egyseg_ar
                     })
@@ -101,10 +106,7 @@ if df is not None:
             if not st.session_state.online_cart_list:
                 st.write("*A kosár jelenleg üres. Várja a beolvasást...*")
             else:
-                # Összesítjük a listában lévő elemeket a megjelenítéshez
                 raw_cart_df = pd.DataFrame(st.session_state.online_cart_list)
-                
-                # Csoportosítunk név és vonalkód szerint, hogy darabszámot számoljunk
                 summary_df = raw_cart_df.groupby(['vonalkod', 'nev']).agg(
                     Mennyiség=('ar', 'count'),
                     Egységár=('ar', 'first')
@@ -112,7 +114,6 @@ if df is not None:
                 
                 summary_df['Részösszeg_Int'] = summary_df['Mennyiség'] * summary_df['Egységár']
                 
-                # Formázás a táblázathoz
                 display_df = pd.DataFrame()
                 display_df['Vonalkód'] = summary_df['vonalkod']
                 display_df['Termék'] = summary_df['nev']
@@ -139,4 +140,5 @@ if df is not None:
     elif menu == "📋 Teljes Táblázat Ellenőrzése":
         st.header("📋 Élő adatok a Google Sheets-ből")
         st.write(f"A(z) **{SHEET_NAME}** fül beolvasott adatai:")
+        # Sima, tiszta megjelenítés
         st.dataframe(df, use_container_width=True)
